@@ -145,6 +145,21 @@ which may contain information on the responsible participants, if possible.
 
 When the protocol successfully completes, the result must be cast to the appropriate type.
 
+### Import an existing secp256k1 key
+
+`cmp.SplitPrivateKey(privateKey, participants)` takes a 32-byte raw private key and three distinct UTF-8 party IDs. It returns one secret contribution per party and the compressed public key. Run this step in a trusted import tool and deliver each contribution only to its intended node over an authenticated, confidential channel.
+
+On each node, start an import session with its own contribution:
+
+```go
+handler, err := protocol.NewMultiHandler(
+    cmp.ImportKey(selfID, participants, contribution, publicKey, chainCode, pl),
+    sessionID,
+)
+```
+
+All three nodes use the same expected public key, participants, optional 32-byte BIP32 chain code, and a unique, non-empty session ID. Pass `nil` for the chain code to generate a new one. Route messages through the usual handler loop. On success, each handler returns its own `*cmp.Config` with the original public key. Signing with this configuration requires all three nodes. Anyone who retains the original private key can still sign independently.
+
 ### Network
 
 Most messages returned by the protocol can be transmitted through a point-to-point network guaranteeing authentication, integrity and confidentiality.
