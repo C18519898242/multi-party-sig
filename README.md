@@ -145,20 +145,34 @@ which may contain information on the responsible participants, if possible.
 
 When the protocol successfully completes, the result must be cast to the appropriate type.
 
-### Import an existing secp256k1 key
+### Import an existing secp256k1 key (3-of-3)
 
-`cmp.SplitPrivateKey(privateKey, participants)` takes a 32-byte raw private key and three distinct UTF-8 party IDs. It returns one secret contribution per party and the compressed public key. Run this step in a trusted import tool and deliver each contribution only to its intended node over an authenticated, confidential channel.
+`cmp.SplitPrivateKey(privateKey, participants)` takes a 32-byte raw private key and three distinct party IDs. Each ID must be valid UTF-8 (1 to 32 bytes) because the CBOR message format encodes IDs as text. The function returns the compressed public key and three single-use additive contributions. The import session uses those contributions to create the final Shamir signing shares.
 
-On each node, start an import session with its own contribution:
+Run the split in a trusted import tool and deliver each contribution only to its intended node over an authenticated, confidential channel. Each node must confirm the expected compressed public key through a separate trusted channel, such as a wallet record established before import. The group-key check verifies the sum of the contributions. The authenticated delivery channel must bind each contribution to its intended recipient.
+
+On each node, start an import session with its own contribution and the verified public key:
 
 ```go
-handler, err := protocol.NewMultiHandler(
-    cmp.ImportKey(selfID, participants, contribution, publicKey, chainCode, pl),
-    sessionID,
+package example
+
+import (
+    "github.com/taurusgroup/multi-party-sig/pkg/party"
+    "github.com/taurusgroup/multi-party-sig/pkg/protocol"
+    "github.com/taurusgroup/multi-party-sig/protocols/cmp"
 )
+
+func startImport(selfID party.ID, participants []party.ID, contribution, expectedPublicKey, chainCode, sessionID []byte) (*protocol.MultiHandler, error) {
+    return protocol.NewMultiHandler(
+        cmp.ImportKey(selfID, participants, contribution, expectedPublicKey, chainCode, nil),
+        sessionID,
+    )
+}
 ```
 
-All three nodes use the same expected public key, participants, optional 32-byte BIP32 chain code, and a unique, non-empty session ID. Pass `nil` for the chain code to generate a new one. Route messages through the usual handler loop. On success, each handler returns its own `*cmp.Config` with the original public key. Signing with this configuration requires all three nodes. Anyone who retains the original private key can still sign independently.
+All three nodes use the same expected public key, participant list, optional 32-byte BIP32 chain code, and unique, non-empty session ID. A supplied chain code is preserved byte for byte, including an all-zero value. Pass `nil` or an empty slice to generate a new chain code. Route messages through the usual handler loop. On success, compare `Config.PublicPoint()` and `Config.RID` across all three nodes before activating their configurations. Signing with those configurations requires all three nodes.
+
+Generate fresh contributions and a fresh session ID for each import attempt, including retries. After verifying the import and its backups, securely retire the original private key and the import tool's contributions. **Anyone who retains the original private key can sign independently.**
 
 ### Network
 

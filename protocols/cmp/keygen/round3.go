@@ -53,7 +53,7 @@ type broadcast3 struct {
 //
 // - verify length of Schnorr commitments
 // - verify degree of VSS polynomial Fⱼ "in-the-exponent"
-//   - if keygen, verify Fⱼ(0) != ∞
+//   - if keygen or import, verify Fⱼ(0) != ∞
 //   - if refresh, verify Fⱼ(0) == ∞
 //
 // - validate Paillier
@@ -85,8 +85,7 @@ func (r *round3) StoreBroadcastMessage(msg round.Message) error {
 
 	// Save all X, VSSCommitments
 	VSSPolynomial := body.VSSPolynomial
-	// check that the constant coefficient is 0
-	// if refresh then the polynomial is constant
+	// Only refresh uses polynomials with zero constant coefficients.
 	if !(r.VSSSecret.Constant().IsZero() == VSSPolynomial.IsConstant) {
 		return errors.New("vss polynomial has incorrect constant")
 	}

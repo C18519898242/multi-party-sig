@@ -144,6 +144,7 @@ func (r *round4) Finalize(out chan<- *round.Message) (round.Session, error) {
 	if err != nil {
 		return r, err
 	}
+	// For import, the combined constant must match the independently verified key.
 	if r.ExpectedPublicKey != nil && !ShamirPublicPolynomial.Constant().Equal(r.ExpectedPublicKey) {
 		return r, errors.New("cmp import: public key mismatch")
 	}

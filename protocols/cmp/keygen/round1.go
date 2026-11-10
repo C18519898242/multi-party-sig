@@ -41,6 +41,7 @@ type round1 struct {
 	// VSSSecret = fᵢ(X)
 	// Polynomial from which the new secret shares are computed.
 	// Keygen:  fᵢ(0) = xⁱ
+	// Import:  fᵢ(0) is the party's additive contribution to the existing key.
 	// Refresh: fᵢ(0) = 0
 	VSSSecret *polynomial.Polynomial
 }

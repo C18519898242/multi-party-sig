@@ -5,8 +5,6 @@ import (
 	"fmt"
 
 	"github.com/taurusgroup/multi-party-sig/internal/round"
-	"github.com/taurusgroup/multi-party-sig/internal/types"
-	"github.com/taurusgroup/multi-party-sig/pkg/hash"
 	"github.com/taurusgroup/multi-party-sig/pkg/math/curve"
 	"github.com/taurusgroup/multi-party-sig/pkg/math/polynomial"
 	"github.com/taurusgroup/multi-party-sig/pkg/math/sample"
@@ -17,33 +15,6 @@ import (
 )
 
 const Rounds round.Number = 5
-
-// StartImport runs key generation using a validated import contribution as the
-// constant term and binds the expected key and chain code to the session.
-func StartImport(info round.Info, sessionID []byte, pl *pool.Pool, contribution curve.Scalar, expected curve.Point, chainCode types.RID) (round.Session, error) {
-	publicKey, err := expected.MarshalBinary()
-	if err != nil {
-		return nil, err
-	}
-	auxInfo := []hash.WriterToWithDomain{hash.BytesWithDomain{TheDomain: "Import public key", Bytes: publicKey}}
-	if chainCode != nil {
-		auxInfo = append(auxInfo, hash.BytesWithDomain{TheDomain: "Import chain code", Bytes: chainCode})
-	}
-	// Hash each ID separately to bind the boundaries between IDs in the roster.
-	for _, id := range party.NewIDSlice(info.PartyIDs) {
-		auxInfo = append(auxInfo, id)
-	}
-	helper, err := round.NewSession(info, sessionID, pl, auxInfo...)
-	if err != nil {
-		return nil, err
-	}
-	return &round1{
-		Helper:            helper,
-		ExpectedPublicKey: expected,
-		PreviousChainKey:  chainCode,
-		VSSSecret:         polynomial.NewPolynomial(info.Group, info.Threshold, contribution),
-	}, nil
-}
 
 func Start(info round.Info, pl *pool.Pool, c *config.Config) protocol.StartFunc {
 	return func(sessionID []byte) (_ round.Session, err error) {

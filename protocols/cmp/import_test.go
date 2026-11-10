@@ -27,53 +27,139 @@ func TestImportKeySignsWithOriginalKey(t *testing.T) {
 	shares, publicKey, err := SplitPrivateKey(privateKey, ids)
 	require.NoError(t, err)
 	require.Equal(t, expectedBytes, publicKey)
-	chainCode := bytes.Repeat([]byte{7}, 32)
-	imports := make(map[party.ID]*protocol.MultiHandler, len(ids))
-	for _, id := range ids {
-		imports[id], err = protocol.NewMultiHandler(ImportKey(id, ids, shares[id], publicKey, chainCode, nil), []byte("import-key"))
-		require.NoError(t, err)
-	}
-	runImportTestHandlers(ids, imports)
+	chainCode := make([]byte, 32)
+	imports := runImportProtocol(t, ids, "import-key", func(id party.ID) protocol.StartFunc {
+		return ImportKey(id, ids, shares[id], publicKey, chainCode, nil)
+	})
 
-	digest := sha256.Sum256([]byte("sign with imported key"))
-	signers := make(map[party.ID]*protocol.MultiHandler, len(ids))
-	for id, h := range imports {
-		result, err := h.Result()
-		require.NoError(t, err)
+	configs := make(map[party.ID]*Config, len(ids))
+	for id, result := range imports {
 		cfg := result.(*Config)
 		require.True(t, cfg.PublicPoint().Equal(expected))
 		require.Equal(t, chainCode, []byte(cfg.ChainKey))
+		require.True(t, cfg.CanSign(ids))
 		require.False(t, cfg.CanSign(ids[:2]))
-		signers[id], err = protocol.NewMultiHandler(Sign(cfg, ids, digest[:], nil), []byte("sign-imported-key"))
-		require.NoError(t, err)
+		configs[id] = cfg
 	}
-	runImportTestHandlers(ids, signers)
-	for _, h := range signers {
-		result, err := h.Result()
-		require.NoError(t, err)
+	presigs := runImportProtocol(t, ids, "presign-imported-key", func(id party.ID) protocol.StartFunc {
+		return Presign(configs[id], ids, nil)
+	})
+	digest := sha256.Sum256([]byte("presign with imported key"))
+	signatures := runImportProtocol(t, ids, "presign-online-imported-key", func(id party.ID) protocol.StartFunc {
+		return PresignOnline(configs[id], presigs[id].(*ecdsa.PreSignature), digest[:], nil)
+	})
+	for _, result := range signatures {
 		require.True(t, result.(*ecdsa.Signature).Verify(expected, digest[:]))
 	}
 }
 
-func TestImportKeyRejectsWrongPublicKey(t *testing.T) {
+func TestImportKeyRestoresAndRefreshesGeneratedChainCode(t *testing.T) {
+	ids := party.IDSlice{"alice", "bob", "carol"}
+	group := curve.Secp256k1{}
+	shares, publicKey, err := SplitPrivateKey(bytes.Repeat([]byte{1}, 32), ids)
+	require.NoError(t, err)
+	expected := group.NewPoint()
+	require.NoError(t, expected.UnmarshalBinary(publicKey))
+	imports := runImportProtocol(t, ids, "import-with-generated-chain-code", func(id party.ID) protocol.StartFunc {
+		roster := ids
+		if id == "bob" {
+			roster = party.IDSlice{"carol", "alice", "bob"}
+		}
+		return ImportKey(id, roster, shares[id], publicKey, nil, nil)
+	})
+	first := imports[ids[0]].(*Config)
+	chainCode := first.ChainKey
+	require.Len(t, chainCode, 32)
+	configs := make(map[party.ID]*Config, len(ids))
+	for id, result := range imports {
+		cfg := result.(*Config)
+		require.Equal(t, first.RID, cfg.RID)
+		require.Equal(t, chainCode, cfg.ChainKey)
+		encoded, err := cfg.MarshalBinary()
+		require.NoError(t, err)
+		restored := EmptyConfig(group)
+		require.NoError(t, restored.UnmarshalBinary(encoded))
+		require.Equal(t, chainCode, restored.ChainKey)
+		require.True(t, restored.PublicPoint().Equal(expected))
+		configs[id] = restored
+	}
+	refreshed := runImportProtocol(t, ids, "refresh-imported-key", func(id party.ID) protocol.StartFunc {
+		return Refresh(configs[id], nil)
+	})
+	digest := sha256.Sum256([]byte("sign after restoring and refreshing"))
+	signatures := runImportProtocol(t, ids, "sign-refreshed-key", func(id party.ID) protocol.StartFunc {
+		cfg := refreshed[id].(*Config)
+		require.Equal(t, chainCode, cfg.ChainKey)
+		return Sign(cfg, ids, digest[:], nil)
+	})
+	for _, result := range signatures {
+		require.True(t, result.(*ecdsa.Signature).Verify(expected, digest[:]))
+	}
+}
+
+func TestSplitPrivateKeyGeneratesFreshContributions(t *testing.T) {
+	ids := party.IDSlice{"a", "b", "c"}
+	privateKey := bytes.Repeat([]byte{1}, 32)
+	shares, _, err := SplitPrivateKey(privateKey, ids)
+	require.NoError(t, err)
+	otherShares, _, err := SplitPrivateKey(privateKey, ids)
+	require.NoError(t, err)
+	group := curve.Secp256k1{}
+	sum := group.NewScalar()
+	seen := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		share := group.NewScalar()
+		require.NoError(t, share.UnmarshalBinary(shares[id]))
+		require.False(t, share.IsZero())
+		require.False(t, seen[string(shares[id])])
+		seen[string(shares[id])] = true
+		require.NotEqual(t, shares[id], otherShares[id])
+		sum.Add(share)
+	}
+	encoded, err := sum.MarshalBinary()
+	require.NoError(t, err)
+	require.Equal(t, privateKey, encoded)
+}
+
+func TestImportKeyRejectsPublicKeyMismatch(t *testing.T) {
 	ids := party.IDSlice{"alice", "bob", "carol"}
 	privateKey := make([]byte, 32)
 	privateKey[31] = 42
-	shares, _, err := SplitPrivateKey(privateKey, ids)
+	shares, publicKey, err := SplitPrivateKey(privateKey, ids)
 	require.NoError(t, err)
-	wrongPublicKey, err := (curve.Secp256k1{}).NewBasePoint().MarshalBinary()
+	group := curve.Secp256k1{}
+	wrongPublicKey, err := group.NewBasePoint().MarshalBinary()
 	require.NoError(t, err)
-
-	handlers := make(map[party.ID]*protocol.MultiHandler, len(ids))
-	for _, id := range ids {
-		handlers[id], err = protocol.NewMultiHandler(ImportKey(id, ids, shares[id], wrongPublicKey, nil, nil), []byte("wrong-import-public-key"))
-		require.NoError(t, err)
-	}
-	runImportTestHandlers(ids, handlers)
-	for _, h := range handlers {
-		result, err := h.Result()
-		require.Nil(t, result)
-		require.ErrorContains(t, err, "public key mismatch")
+	badShare := group.NewScalar()
+	require.NoError(t, badShare.UnmarshalBinary(shares["alice"]))
+	tampered, err := badShare.Negate().MarshalBinary()
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		name         string
+		publicKey    []byte
+		contribution []byte
+	}{
+		{"wrong expected key", wrongPublicKey, shares["alice"]},
+		{"wrong contribution", publicKey, tampered},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			handlers := make(map[party.ID]*protocol.MultiHandler, len(ids))
+			for _, id := range ids {
+				contribution := shares[id]
+				if id == "alice" {
+					contribution = tc.contribution
+				}
+				h, err := protocol.NewMultiHandler(ImportKey(id, ids, contribution, tc.publicKey, nil, nil), []byte(tc.name))
+				require.NoError(t, err)
+				handlers[id] = h
+			}
+			runImportTestHandlers(ids, handlers)
+			for _, h := range handlers {
+				result, err := h.Result()
+				require.Nil(t, result)
+				require.ErrorContains(t, err, "public key mismatch")
+			}
+		})
 	}
 }
 
@@ -84,7 +170,7 @@ func TestImportKeyRejectsInvalidInputs(t *testing.T) {
 		_, _, err := SplitPrivateKey(invalid, ids)
 		require.Error(t, err)
 	}
-	for _, invalid := range []party.IDSlice{ids[:2], {"a", "a", "c"}, {"a", "\x00a", "c"}, {"a", "\x00", "c"}, {"a", "b", "\xff"}} {
+	for _, invalid := range []party.IDSlice{ids[:2], {"a", "b", "c", "d"}, {"a", "a", "c"}, {"a", "\x00a", "c"}, {"a", "\x00", "c"}, {"a", "b", "\xff"}} {
 		_, _, err := SplitPrivateKey(privateKey, invalid)
 		require.Error(t, err)
 	}
@@ -92,11 +178,19 @@ func TestImportKeyRejectsInvalidInputs(t *testing.T) {
 	require.NoError(t, err)
 	_, err = ImportKey("a", ids, shares["a"], publicKey, nil, nil)(nil)
 	require.Error(t, err)
-	_, err = ImportKey("a", ids, shares["a"], publicKey, []byte{1}, nil)([]byte("invalid-chain-code"))
+	sessionID := []byte("invalid-input")
+	_, err = ImportKey("other", ids, shares["a"], publicKey, nil, nil)(sessionID)
+	require.ErrorContains(t, err, "cmp import: self ID")
+	for _, contribution := range [][]byte{make([]byte, 32), make([]byte, 33)} {
+		_, err = ImportKey("a", ids, contribution, publicKey, nil, nil)(sessionID)
+		require.Error(t, err)
+	}
+	_, err = ImportKey("a", ids, shares["a"], publicKey, make([]byte, 33), nil)(sessionID)
 	require.Error(t, err)
-	publicKey[0] = 4
-	_, err = ImportKey("a", ids, shares["a"], publicKey, nil, nil)([]byte("invalid-public-key"))
-	require.Error(t, err)
+	for _, invalid := range [][]byte{append([]byte{4}, publicKey[1:]...), make([]byte, 65), append([]byte{2}, bytes.Repeat([]byte{0xff}, 32)...)} {
+		_, err = ImportKey("a", ids, shares["a"], invalid, nil, nil)(sessionID)
+		require.Error(t, err)
+	}
 }
 
 func TestImportKeyBindsSessionRoster(t *testing.T) {
@@ -113,6 +207,27 @@ func TestImportKeyBindsSessionRoster(t *testing.T) {
 	other, err := ImportKey("z", []party.ID{"ab", "c", "z"}, contributions["z"], publicKey, nil, nil)(sessionID)
 	require.NoError(t, err)
 	require.NotEqual(t, first.SSID(), other.SSID())
+	otherChain, err := ImportKey("z", ids, contributions["z"], publicKey, make([]byte, 32), nil)(sessionID)
+	require.NoError(t, err)
+	require.NotEqual(t, first.SSID(), otherChain.SSID())
+}
+
+func runImportProtocol(t *testing.T, ids party.IDSlice, sessionID string, start func(party.ID) protocol.StartFunc) map[party.ID]interface{} {
+	t.Helper()
+	handlers := make(map[party.ID]*protocol.MultiHandler, len(ids))
+	for _, id := range ids {
+		h, err := protocol.NewMultiHandler(start(id), []byte(sessionID))
+		require.NoError(t, err)
+		handlers[id] = h
+	}
+	runImportTestHandlers(ids, handlers)
+	results := make(map[party.ID]interface{}, len(ids))
+	for id, h := range handlers {
+		result, err := h.Result()
+		require.NoError(t, err)
+		results[id] = result
+	}
+	return results
 }
 
 func runImportTestHandlers(ids party.IDSlice, handlers map[party.ID]*protocol.MultiHandler) {
